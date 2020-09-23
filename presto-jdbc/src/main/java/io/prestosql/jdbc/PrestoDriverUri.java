@@ -13,12 +13,20 @@
  */
 package io.prestosql.jdbc;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.common.net.HostAndPort;
+import io.airlift.units.Duration;
 import io.prestosql.client.ClientException;
 import io.prestosql.client.ClientSelectedRole;
+import io.prestosql.client.auth.external.DesktopBrowserRedirectHandler;
+import io.prestosql.client.auth.external.ExternalAuthenticator;
+import io.prestosql.client.auth.external.RedirectHandler;
+import io.prestosql.client.auth.external.TokenPoll;
+import io.prestosql.client.auth.external.Tokens;
+import net.jodah.failsafe.RetryPolicy;
 import okhttp3.OkHttpClient;
 
 import java.io.File;
@@ -31,6 +39,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static io.prestosql.client.KerberosUtil.defaultCredentialCachePath;
@@ -47,6 +56,8 @@ import static io.prestosql.jdbc.ConnectionProperties.APPLICATION_NAME_PREFIX;
 import static io.prestosql.jdbc.ConnectionProperties.CLIENT_INFO;
 import static io.prestosql.jdbc.ConnectionProperties.CLIENT_TAGS;
 import static io.prestosql.jdbc.ConnectionProperties.DISABLE_COMPRESSION;
+import static io.prestosql.jdbc.ConnectionProperties.EXTERNAL_AUTHENTICATION;
+import static io.prestosql.jdbc.ConnectionProperties.EXTERNAL_AUTHENTICATION_TIMEOUT;
 import static io.prestosql.jdbc.ConnectionProperties.EXTRA_CREDENTIALS;
 import static io.prestosql.jdbc.ConnectionProperties.HTTP_PROXY;
 import static io.prestosql.jdbc.ConnectionProperties.KERBEROS_CONFIG_PATH;
@@ -76,6 +87,7 @@ import static io.prestosql.jdbc.ConnectionProperties.SslVerificationMode.NONE;
 import static io.prestosql.jdbc.ConnectionProperties.TRACE_TOKEN;
 import static io.prestosql.jdbc.ConnectionProperties.USER;
 import static java.lang.String.format;
+import static java.time.temporal.ChronoUnit.MILLIS;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -88,6 +100,7 @@ public final class PrestoDriverUri
 
     private static final Splitter QUERY_SPLITTER = Splitter.on('&').omitEmptyStrings();
     private static final Splitter ARG_SPLITTER = Splitter.on('=').limit(2);
+    private static final AtomicReference<RedirectHandler> REDIRECT_HANDLER = new AtomicReference<>(new DesktopBrowserRedirectHandler());
 
     private final HostAndPort address;
     private final URI uri;
@@ -277,6 +290,26 @@ public final class PrestoDriverUri
                 }
                 builder.addInterceptor(tokenAuth(ACCESS_TOKEN.getValue(properties).get()));
             }
+            if (EXTERNAL_AUTHENTICATION.getValue(properties).orElse(false)) {
+                if (!useSecureConnection) {
+                    throw new SQLException("Authentication using external authorization requires SSL to be enabled");
+                }
+
+                Duration timeout = EXTERNAL_AUTHENTICATION_TIMEOUT.getValue(properties)
+                        .orElse(Duration.valueOf("120s"));
+                ExternalAuthenticator authenticator = new ExternalAuthenticator(
+                        REDIRECT_HANDLER.get(),
+                        //We need to create a separate httpClient, that shares all common settings, but without the not required authentications.
+                        new Tokens(builder.build()),
+                        new RetryPolicy<TokenPoll>()
+                                .withMaxAttempts(-1)
+                                .withMaxDuration(java.time.Duration.ofMillis(timeout.toMillis()))
+                                .withBackoff(100, 500, MILLIS, 1.1d),
+                        timeout);
+
+                builder.authenticator(authenticator);
+                builder.addInterceptor(authenticator);
+            }
         }
         catch (ClientException e) {
             throw new SQLException(e.getMessage(), e);
@@ -427,5 +460,13 @@ public final class PrestoDriverUri
         for (ConnectionProperty<?> property : ConnectionProperties.allProperties()) {
             property.validate(connectionProperties);
         }
+    }
+
+    @VisibleForTesting
+    public static void setRedirectHandler(RedirectHandler handler)
+    {
+        requireNonNull(handler, "handler is null");
+
+        REDIRECT_HANDLER.set(handler);
     }
 }

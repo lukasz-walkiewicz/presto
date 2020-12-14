@@ -23,6 +23,7 @@ import io.airlift.units.Duration;
 import io.jsonwebtoken.SigningKeyResolver;
 import io.prestosql.server.security.jwt.JwkService;
 import io.prestosql.server.security.jwt.JwkSigningKeyResolver;
+import io.prestosql.server.ui.OAuth2WebUiInstalled;
 
 import java.net.URI;
 import java.util.concurrent.TimeUnit;
@@ -39,6 +40,8 @@ public class OAuth2ServiceModule
     protected void setup(Binder binder)
     {
         jaxrsBinder(binder).bind(OAuth2CallbackResource.class);
+        newOptionalBinder(binder, OAuth2WebUiInstalled.class);
+        newOptionalBinder(binder, OAuth2TokenExchange.class);
 
         configBinder(binder).bindConfig(OAuth2Config.class);
         binder.bind(OAuth2Service.class).in(Scopes.SINGLETON);

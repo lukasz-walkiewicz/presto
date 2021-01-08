@@ -1,0 +1,10 @@
+version: '3'
+services:
+  presto:
+    image: "trino:351-89-g1adb72ad8f"
+    ports:
+      - "8443:8443"
+    volumes:
+      - type: bind
+        source: ./trino/etc
+        target: /etc/trino
